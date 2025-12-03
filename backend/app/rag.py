@@ -1,6 +1,8 @@
 """
 RAG module using ChromaDB for vector storage and Ollama for embeddings + generation.
 
+Now uses centralized configuration from config.py and modular pipeline components.
+
 Multi-Model Strategy (mirrors Claude Haiku/Sonnet pattern):
 - Router: Fast classification of query complexity
 - Worker: Balanced quality for standard RAG queries
@@ -22,40 +24,53 @@ Prerequisites:
 3. Pull models (see above)
 """
 
-from typing import List, Tuple
+from typing import List, Tuple, Optional
+from dataclasses import dataclass
+import time
 import chromadb
 import ollama
 
+from .config import get_config, ModelTier, RetrievalStrategy
+from .pipeline.chunker import RecursiveChunker, Chunk
+
+
 # ---------------------------------------------------------------------------
-# Configuration - Multi-Model Strategy
+# Get configuration
 # ---------------------------------------------------------------------------
-# Mirrors Claude Haiku/Sonnet pattern:
-# - Router: cheap/fast for classification and routing decisions
-# - Worker: balanced for retrieval QA and standard tasks  
-# - Synthesis: high quality for complex reasoning and final answers
+config = get_config()
 
-EMBEDDING_MODEL = "nomic-embed-text"
 
-# Model tiers (pull these with: ollama pull <model>)
-# Light setup: uses qwen2.5:3b for everything (~2GB total)
-# Full setup: uncomment larger models for better quality
-MODELS = {
-    "router": "qwen2.5:3b",        # Fast routing/classification (~2GB)
-    "worker": "qwen2.5:3b",        # Light: same as router | Full: gemma3:12b
-    "synthesis": "qwen2.5:3b",     # Light: same as router | Full: mistral-small
-}
+# ---------------------------------------------------------------------------
+# Metrics tracking
+# ---------------------------------------------------------------------------
+@dataclass
+class QueryMetrics:
+    """Metrics for a single query."""
+    query: str
+    model_tier: str
+    model_used: str
+    retrieval_strategy: str
+    num_chunks_retrieved: int
+    latency_embed_ms: float = 0.0
+    latency_retrieve_ms: float = 0.0
+    latency_generate_ms: float = 0.0
+    latency_total_ms: float = 0.0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    
+    @property
+    def latency_breakdown(self) -> dict:
+        return {
+            "embed_ms": self.latency_embed_ms,
+            "retrieve_ms": self.latency_retrieve_ms,
+            "generate_ms": self.latency_generate_ms,
+            "total_ms": self.latency_total_ms,
+        }
 
-# Default model for simple queries
-DEFAULT_MODEL = "worker"
 
-# To upgrade to full multi-model setup, uncomment:
-# MODELS = {
-#     "router": "qwen2.5:3b",        # Fast routing/classification (~2GB)
-#     "worker": "gemma3:12b",        # Balanced quality for RAG QA (~7GB)
-#     "synthesis": "mistral-small",  # Best quality for complex tasks (~14GB)
-# }
-
-COLLECTION_NAME = "pwc_docs"
+# Store recent metrics for observability
+_recent_metrics: List[QueryMetrics] = []
+MAX_METRICS_HISTORY = 100
 
 # Sample documents - replace with your own corpus
 DOCUMENTS = [
@@ -82,52 +97,105 @@ DOCUMENTS = [
 ]
 
 # ---------------------------------------------------------------------------
-# ChromaDB setup (persistent, stored in ./chroma_db)
+# ChromaDB setup (persistent, uses config)
 # ---------------------------------------------------------------------------
-_client = chromadb.PersistentClient(path="./chroma_db")
+_client = chromadb.PersistentClient(path=config.vectordb.persist_path)
 _collection = _client.get_or_create_collection(
-    name=COLLECTION_NAME,
-    metadata={"hnsw:space": "cosine"},
+    name=config.vectordb.collection_name,
+    metadata={"hnsw:space": config.vectordb.distance_metric},
 )
 
 
-def _get_embedding(text: str) -> List[float]:
-    """Get embedding vector from Ollama."""
-    response = ollama.embeddings(model=EMBEDDING_MODEL, prompt=text)
-    return response["embedding"]
+def _get_embedding(text: str) -> Tuple[List[float], float]:
+    """Get embedding vector from Ollama with timing."""
+    start = time.time()
+    response = ollama.embeddings(model=config.embedding.model, prompt=text)
+    latency_ms = (time.time() - start) * 1000
+    return response["embedding"], latency_ms
 
 
-def index_documents() -> None:
-    """Index all documents into ChromaDB. Safe to call multiple times."""
+def index_documents(documents: Optional[List[dict]] = None) -> int:
+    """
+    Index documents into ChromaDB. Safe to call multiple times.
+    
+    Args:
+        documents: List of dicts with 'id' and 'text'. Uses DOCUMENTS if None.
+        
+    Returns:
+        Number of documents indexed
+    """
+    docs = documents or DOCUMENTS
     existing_ids = set(_collection.get()["ids"])
-    for doc in DOCUMENTS:
+    indexed = 0
+    
+    for doc in docs:
         if doc["id"] not in existing_ids:
-            embedding = _get_embedding(doc["text"])
+            embedding, _ = _get_embedding(doc["text"])
             _collection.add(
                 ids=[doc["id"]],
                 embeddings=[embedding],
                 documents=[doc["text"]],
-                metadatas=[{"id": doc["id"]}],
+                metadatas=[{"id": doc["id"], **doc.get("metadata", {})}],
             )
-    print(f"Indexed {_collection.count()} documents in ChromaDB.")
+            indexed += 1
+    
+    total = _collection.count()
+    print(f"Indexed {indexed} new documents. Total: {total} in ChromaDB.")
+    return indexed
 
 
-def retrieve(question: str, k: int = 3) -> List[dict]:
-    """Semantic retrieval using ChromaDB."""
-    query_embedding = _get_embedding(question)
+def retrieve(
+    question: str,
+    k: Optional[int] = None,
+    strategy: Optional[RetrievalStrategy] = None,
+) -> Tuple[List[dict], float]:
+    """
+    Retrieve relevant passages using configured strategy.
+    
+    Args:
+        question: The query string
+        k: Number of results (uses config default if None)
+        strategy: Retrieval strategy (uses config default if None)
+        
+    Returns:
+        Tuple of (passages list, latency in ms)
+    """
+    k = k or config.retrieval.top_k
+    strategy = strategy or config.retrieval.strategy
+    
+    start = time.time()
+    query_embedding, embed_latency = _get_embedding(question)
+    
     results = _collection.query(
         query_embeddings=[query_embedding],
         n_results=k,
         include=["documents", "metadatas", "distances"],
     )
+    
     passages = []
     for i, doc_id in enumerate(results["ids"][0]):
-        passages.append({
-            "id": doc_id,
-            "text": results["documents"][0][i],
-            "score": 1 - results["distances"][0][i],  # Convert distance to similarity
-        })
-    return passages
+        score = 1 - results["distances"][0][i]  # Convert distance to similarity
+        
+        # Apply similarity threshold
+        if score >= config.retrieval.similarity_threshold:
+            passages.append({
+                "id": doc_id,
+                "text": results["documents"][0][i],
+                "score": score,
+                "metadata": results["metadatas"][0][i] if results["metadatas"] else {},
+            })
+    
+    total_latency = (time.time() - start) * 1000
+    return passages, total_latency
+
+
+def get_collection_stats() -> dict:
+    """Get statistics about the vector collection."""
+    return {
+        "total_documents": _collection.count(),
+        "collection_name": config.vectordb.collection_name,
+        "distance_metric": config.vectordb.distance_metric,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -155,64 +223,117 @@ Query: {question}
 Respond with only: SIMPLE or COMPLEX"""
 
 
-def _call_llm(model_tier: str, system_prompt: str, user_prompt: str) -> str:
-    """Call Ollama with specified model tier."""
-    model = MODELS.get(model_tier, MODELS[DEFAULT_MODEL])
+def _call_llm(
+    model_tier: ModelTier,
+    system_prompt: str,
+    user_prompt: str,
+) -> Tuple[str, float]:
+    """
+    Call Ollama with specified model tier.
+    
+    Returns:
+        Tuple of (response content, latency in ms)
+    """
+    model = config.llm.get_model(model_tier)
+    start = time.time()
+    
     response = ollama.chat(
         model=model,
         messages=[
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ],
+        options={
+            "temperature": config.llm.temperature,
+            "num_predict": config.llm.max_tokens,
+        },
     )
-    return response["message"]["content"]
+    
+    latency_ms = (time.time() - start) * 1000
+    return response["message"]["content"], latency_ms
 
 
-def route_query(question: str) -> str:
+def route_query(question: str) -> ModelTier:
     """Use router model to classify query complexity."""
     try:
-        result = _call_llm(
-            "router",
+        result, _ = _call_llm(
+            ModelTier.ROUTER,
             "You are a query classifier. Respond with only SIMPLE or COMPLEX.",
             ROUTER_PROMPT.format(question=question),
         )
         # Parse response
         if "COMPLEX" in result.upper():
-            return "synthesis"
-        return "worker"
+            return ModelTier.SYNTHESIS
+        return ModelTier.WORKER
     except Exception as e:
         print(f"Router failed, defaulting to worker: {e}")
-        return "worker"
+        return ModelTier.WORKER
 
 
-def answer_question(question: str, use_routing: bool = True) -> Tuple[str, List[str]]:
+def get_recent_metrics() -> List[QueryMetrics]:
+    """Get recent query metrics for observability."""
+    return _recent_metrics.copy()
+
+
+def answer_question(
+    question: str,
+    use_routing: bool = True,
+    top_k: Optional[int] = None,
+    strategy: Optional[RetrievalStrategy] = None,
+) -> Tuple[str, List[str], Optional[QueryMetrics]]:
     """
-    Full RAG pipeline with optional multi-model routing:
-    1. (Optional) Route query to appropriate model tier
-    2. Retrieve relevant passages from ChromaDB
-    3. Build prompt with context
-    4. Generate answer using selected Ollama model
+    Full RAG pipeline with optional multi-model routing and metrics.
+    
+    Args:
+        question: The user's question
+        use_routing: Whether to use the router to select model tier
+        top_k: Override for number of chunks to retrieve
+        strategy: Override for retrieval strategy
+        
+    Returns:
+        Tuple of (answer, citations, metrics)
     """
+    total_start = time.time()
+    
     # Step 1: Route to appropriate model
     if use_routing:
         model_tier = route_query(question)
     else:
-        model_tier = DEFAULT_MODEL
+        model_tier = ModelTier.WORKER
     
-    # Step 2: Retrieve
-    passages = retrieve(question, k=3)
+    # Step 2: Retrieve with timing
+    passages, retrieve_latency = retrieve(question, k=top_k, strategy=strategy)
     context = "\n".join(f"[{p['id']}] {p['text']}" for p in passages)
     citations = [p["id"] for p in passages]
 
     # Step 3: Generate with selected model
     user_prompt = USER_PROMPT_TEMPLATE.format(context=context, question=question)
-    answer = _call_llm(model_tier, SYSTEM_PROMPT, user_prompt)
+    answer, generate_latency = _call_llm(model_tier, SYSTEM_PROMPT, user_prompt)
+    
+    total_latency = (time.time() - total_start) * 1000
+    
+    # Build metrics
+    model_used = config.llm.get_model(model_tier)
+    metrics = QueryMetrics(
+        query=question,
+        model_tier=model_tier.value,
+        model_used=model_used,
+        retrieval_strategy=(strategy or config.retrieval.strategy).value,
+        num_chunks_retrieved=len(passages),
+        latency_retrieve_ms=retrieve_latency,
+        latency_generate_ms=generate_latency,
+        latency_total_ms=total_latency,
+    )
+    
+    # Store metrics
+    _recent_metrics.append(metrics)
+    if len(_recent_metrics) > MAX_METRICS_HISTORY:
+        _recent_metrics.pop(0)
     
     # Add model info for debugging
-    model_used = MODELS.get(model_tier, MODELS[DEFAULT_MODEL])
     answer = f"[Model: {model_used}]\n\n{answer}"
 
-    return answer, citations
+    return answer, citations, metrics
 
 
 # ---------------------------------------------------------------------------
