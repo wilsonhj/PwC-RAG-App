@@ -128,6 +128,16 @@ class TestStructuredLogger:
         assert log_data["data"]["latency_ms"] == 1500.0
         assert log_data["data"]["num_chunks"] == 3
     
+    def test_trace_id_included(self, capsys):
+        logger = StructuredLogger(output_json=True)
+        logger.set_trace_id("trace-xyz")
+        logger.log_query_start("Trace test", "semantic")
+        logger.clear_trace_id()
+        captured = capsys.readouterr()
+        log_data = json.loads(captured.out.strip())
+        assert log_data["trace_id"] == "trace-xyz"
+        assert log_data["event"] == "query_start"
+    
     def test_log_llm_call(self, capsys):
         logger = StructuredLogger(output_json=True, level=LogLevel.DEBUG)
         logger.log_llm_call(

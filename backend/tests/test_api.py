@@ -107,6 +107,11 @@ class TestQueryEndpoint:
                 assert "answer" in data
                 assert "citations" in data
                 assert "metrics" in data
+                metrics = data["metrics"]
+                for field in ["input_tokens", "output_tokens", "total_tokens"]:
+                    assert field in metrics
+                    assert isinstance(metrics[field], (int, float))
+                assert metrics["total_tokens"] == metrics["input_tokens"] + metrics["output_tokens"]
             else:
                 # Ollama might not be running
                 pytest.skip("Ollama not available")
@@ -130,6 +135,8 @@ class TestQueryEndpoint:
             if response.status_code == 200:
                 data = response.json()
                 assert len(data["citations"]) <= 2
+                metrics = data["metrics"]
+                assert metrics["total_tokens"] == metrics["input_tokens"] + metrics["output_tokens"]
             else:
                 pytest.skip("Ollama not available")
         except Exception as e:
@@ -172,6 +179,7 @@ class TestAgentEndpoint:
                 assert "latency_ms" in data
                 assert "model_used" in data
                 assert "refinement_count" in data
+                assert "metrics" not in data  # Agent endpoint does not expose token metrics yet
                 
                 # Verify steps were executed
                 assert isinstance(data["steps_executed"], list)
