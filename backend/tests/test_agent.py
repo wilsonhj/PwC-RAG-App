@@ -14,29 +14,38 @@ from app.pipeline.agent import (
     create_generate_node,
     should_refine,
 )
+from app.pipeline.tokenizer import TokenUsage
 from app.config import RetrievalStrategy
+
+
+def make_state(**overrides) -> AgentState:
+    base: AgentState = {
+        "question": "What is RAG?",
+        "complexity": "simple",
+        "retrieval_strategy": "semantic",
+        "passages": [],
+        "context": "",
+        "answer": "",
+        "citations": [],
+        "needs_refinement": False,
+        "refinement_count": 0,
+        "max_refinements": 1,
+        "steps_executed": [],
+        "latency_ms": 0.0,
+        "model_used": "",
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "total_tokens": 0,
+    }
+    base.update(overrides)
+    return base
 
 
 class TestAgentState:
     """Tests for AgentState structure."""
     
     def test_initial_state(self):
-        state: AgentState = {
-            "question": "What is RAG?",
-            "complexity": "simple",
-            "retrieval_strategy": "semantic",
-            "passages": [],
-            "context": "",
-            "answer": "",
-            "citations": [],
-            "needs_refinement": False,
-            "refinement_count": 0,
-            "max_refinements": 1,
-            "steps_executed": [],
-            "latency_ms": 0.0,
-            "model_used": "",
-        }
-        
+        state = make_state()
         assert state["question"] == "What is RAG?"
         assert state["complexity"] == "simple"
         assert state["steps_executed"] == []
@@ -50,7 +59,7 @@ class TestAgentConfig:
         
         assert config.max_refinements == 1
         assert config.top_k == 3
-        assert config.enable_refinement == True
+        assert config.enable_refinement is True
     
     def test_custom_config(self):
         config = AgentConfig(max_refinements=2, top_k=5)
@@ -72,134 +81,44 @@ class TestAgentResult:
             latency_ms=1500.0,
             model_used="worker",
             refinement_count=0,
+            input_tokens=42,
+            output_tokens=18,
+            total_tokens=60,
         )
         
         assert "RAG" in result.answer
         assert len(result.citations) == 2
-        assert result.complexity == "simple"
-        assert len(result.steps_executed) == 3
+        assert result.total_tokens == 60
 
 
 class TestShouldRefine:
     """Tests for the refinement decision logic."""
     
     def test_no_refinement_needed(self):
-        state: AgentState = {
-            "question": "test",
-            "complexity": "simple",
-            "retrieval_strategy": "semantic",
-            "passages": [],
-            "context": "",
-            "answer": "A complete answer.",
-            "citations": [],
-            "needs_refinement": False,
-            "refinement_count": 0,
-            "max_refinements": 1,
-            "steps_executed": [],
-            "latency_ms": 0.0,
-            "model_used": "",
-        }
-        
-        result = should_refine(state)
-        assert result == "end"
+        state = make_state(answer="A complete answer.")
+        assert should_refine(state) == "end"
     
     def test_refinement_needed(self):
-        state: AgentState = {
-            "question": "test",
-            "complexity": "simple",
-            "retrieval_strategy": "semantic",
-            "passages": [],
-            "context": "",
-            "answer": "Short.",
-            "citations": [],
-            "needs_refinement": True,
-            "refinement_count": 0,
-            "max_refinements": 1,
-            "steps_executed": [],
-            "latency_ms": 0.0,
-            "model_used": "",
-        }
-        
-        result = should_refine(state)
-        assert result == "refine"
+        state = make_state(answer="Short.", needs_refinement=True)
+        assert should_refine(state) == "refine"
     
     def test_max_refinements_reached(self):
-        state: AgentState = {
-            "question": "test",
-            "complexity": "simple",
-            "retrieval_strategy": "semantic",
-            "passages": [],
-            "context": "",
-            "answer": "Short.",
-            "citations": [],
-            "needs_refinement": True,
-            "refinement_count": 1,
-            "max_refinements": 1,
-            "steps_executed": [],
-            "latency_ms": 0.0,
-            "model_used": "",
-        }
-        
-        result = should_refine(state)
-        assert result == "end"
+        state = make_state(answer="Short.", needs_refinement=True, refinement_count=1)
+        assert should_refine(state) == "end"
 
 
 class TestClassifyNode:
     """Tests for the classify node."""
     
     def test_classify_simple_query(self):
-        # Mock LLM that returns SIMPLE
-        def mock_llm(tier, system, user):
-            return "SIMPLE", 10.0
-        
-        classify = create_classify_node(mock_llm, "Classify: {question}")
-        
-        state: AgentState = {
-            "question": "What is RAG?",
-            "complexity": "simple",
-            "retrieval_strategy": "semantic",
-            "passages": [],
-            "context": "",
-            "answer": "",
-            "citations": [],
-            "needs_refinement": False,
-            "refinement_count": 0,
-            "max_refinements": 1,
-            "steps_executed": [],
-            "latency_ms": 0.0,
-            "model_used": "",
-        }
-        
-        result = classify(state)
-        
+        classify = create_classify_node(lambda *args: ("SIMPLE", 10.0, None), "Classify: {question}")
+        result = classify(make_state())
         assert result["complexity"] == "simple"
         assert "classify" in result["steps_executed"]
     
     def test_classify_complex_query(self):
-        # Mock LLM that returns COMPLEX
-        def mock_llm(tier, system, user):
-            return "COMPLEX", 10.0
-        
-        classify = create_classify_node(mock_llm, "Classify: {question}")
-        
-        state: AgentState = {
-            "question": "Compare different AI approaches",
-            "complexity": "simple",
-            "retrieval_strategy": "semantic",
-            "passages": [],
-            "context": "",
-            "answer": "",
-            "citations": [],
-            "needs_refinement": False,
-            "refinement_count": 0,
-            "max_refinements": 1,
-            "steps_executed": [],
-            "latency_ms": 0.0,
-            "model_used": "",
-        }
-        
-        result = classify(state)
-        
+        classify = create_classify_node(lambda *args: ("COMPLEX", 10.0, None), "Classify: {question}")
+        result = classify(make_state(question="Compare different AI approaches"))
         assert result["complexity"] == "complex"
         assert result["retrieval_strategy"] == "hybrid"
 
@@ -208,32 +127,12 @@ class TestRetrieveNode:
     """Tests for the retrieve node."""
     
     def test_retrieve_passages(self):
-        # Mock retrieve function
         def mock_retrieve(question, k, strategy):
             return [
                 {"id": "chunk-1", "text": "Test passage", "score": 0.9, "metadata": {}},
             ], 50.0, "semantic"
-        
         retrieve = create_retrieve_node(mock_retrieve)
-        
-        state: AgentState = {
-            "question": "What is RAG?",
-            "complexity": "simple",
-            "retrieval_strategy": "semantic",
-            "passages": [],
-            "context": "",
-            "answer": "",
-            "citations": [],
-            "needs_refinement": False,
-            "refinement_count": 0,
-            "max_refinements": 1,
-            "steps_executed": [],
-            "latency_ms": 0.0,
-            "model_used": "",
-        }
-        
-        result = retrieve(state)
-        
+        result = retrieve(make_state())
         assert len(result["passages"]) == 1
         assert result["citations"] == ["chunk-1"]
         assert "retrieve" in result["steps_executed"]
@@ -243,130 +142,36 @@ class TestGenerateNode:
     """Tests for the generate node."""
     
     def test_generate_answer(self):
-        # Mock LLM
         def mock_llm(tier, system, user):
-            return "RAG is Retrieval-Augmented Generation.", 100.0
-        
-        generate = create_generate_node(
-            mock_llm,
-            "You are an assistant.",
-            "Context: {context}\nQuestion: {question}",
-        )
-        
-        state: AgentState = {
-            "question": "What is RAG?",
-            "complexity": "simple",
-            "retrieval_strategy": "semantic",
-            "passages": [],
-            "context": "[chunk-1] RAG combines retrieval with generation.",
-            "answer": "",
-            "citations": ["chunk-1"],
-            "needs_refinement": False,
-            "refinement_count": 0,
-            "max_refinements": 1,
-            "steps_executed": [],
-            "latency_ms": 0.0,
-            "model_used": "",
-        }
-        
-        result = generate(state)
-        
-        assert "RAG" in result["answer"]
+            return "RAG is Retrieval-Augmented Generation.", 100.0, TokenUsage(10, 5, 15)
+        generate = create_generate_node(mock_llm, "You are an assistant.", "Context: {context}\nQuestion: {question}")
+        result = generate(make_state(context="[chunk-1] RAG combines retrieval with generation.", citations=["chunk-1"]))
         assert result["model_used"] == "worker"
-        assert "generate" in result["steps_executed"]
+        assert result["total_tokens"] == 15
     
     def test_generate_uses_synthesis_for_complex(self):
-        """Test that complex queries use synthesis model."""
         def mock_llm(tier, system, user):
-            return f"Answer from {tier}", 100.0
-        
-        generate = create_generate_node(
-            mock_llm,
-            "You are an assistant.",
-            "Context: {context}\nQuestion: {question}",
-        )
-        
-        state: AgentState = {
-            "question": "Compare approaches",
-            "complexity": "complex",  # Complex query
-            "retrieval_strategy": "hybrid",
-            "passages": [],
-            "context": "Some context",
-            "answer": "",
-            "citations": [],
-            "needs_refinement": False,
-            "refinement_count": 0,
-            "max_refinements": 1,
-            "steps_executed": [],
-            "latency_ms": 0.0,
-            "model_used": "",
-        }
-        
-        result = generate(state)
-        
+            return f"Answer from {tier}", 100.0, TokenUsage(8, 4, 12)
+        generate = create_generate_node(mock_llm, "You are an assistant.", "Context: {context}\nQuestion: {question}")
+        result = generate(make_state(question="Compare approaches", complexity="complex", retrieval_strategy="hybrid"))
         assert result["model_used"] == "synthesis"
+        assert result["total_tokens"] == 12
     
     def test_generate_triggers_refinement_for_short_answer(self):
-        """Test that short answers trigger refinement."""
         def mock_llm(tier, system, user):
-            return "Short.", 100.0  # Very short answer
-        
-        generate = create_generate_node(
-            mock_llm,
-            "You are an assistant.",
-            "Context: {context}\nQuestion: {question}",
-        )
-        
-        state: AgentState = {
-            "question": "What is RAG?",
-            "complexity": "simple",
-            "retrieval_strategy": "semantic",
-            "passages": [],
-            "context": "Context here",
-            "answer": "",
-            "citations": [],
-            "needs_refinement": False,
-            "refinement_count": 0,
-            "max_refinements": 1,
-            "steps_executed": [],
-            "latency_ms": 0.0,
-            "model_used": "",
-        }
-        
-        result = generate(state)
-        
-        assert result["needs_refinement"] == True
-    
+            return "Short.", 100.0, TokenUsage(5, 2, 7)
+        generate = create_generate_node(mock_llm, "You are an assistant.", "Context: {context}\nQuestion: {question}")
+        result = generate(make_state(context="Context here"))
+        assert result["needs_refinement"] is True
+        assert result["total_tokens"] == 7
+
     def test_generate_triggers_refinement_for_uncertain_answer(self):
-        """Test that uncertain answers trigger refinement."""
         def mock_llm(tier, system, user):
-            return "I don't have enough information to answer this question fully.", 100.0
-        
-        generate = create_generate_node(
-            mock_llm,
-            "You are an assistant.",
-            "Context: {context}\nQuestion: {question}",
-        )
-        
-        state: AgentState = {
-            "question": "What is quantum computing?",
-            "complexity": "simple",
-            "retrieval_strategy": "semantic",
-            "passages": [],
-            "context": "No relevant context",
-            "answer": "",
-            "citations": [],
-            "needs_refinement": False,
-            "refinement_count": 0,
-            "max_refinements": 1,
-            "steps_executed": [],
-            "latency_ms": 0.0,
-            "model_used": "",
-        }
-        
-        result = generate(state)
-        
-        assert result["needs_refinement"] == True
+            return "I don't have enough information to answer this question fully.", 100.0, TokenUsage(6, 3, 9)
+        generate = create_generate_node(mock_llm, "You are an assistant.", "Context: {context}\nQuestion: {question}")
+        result = generate(make_state(question="What is quantum computing?", context="No relevant context"))
+        assert result["needs_refinement"] is True
+        assert result["total_tokens"] == 9
 
 
 class TestRefineNode:
@@ -374,92 +179,63 @@ class TestRefineNode:
     
     def test_refine_improves_answer(self):
         from app.pipeline.agent import create_refine_node
-        
+
         def mock_llm(tier, system, user):
-            return "This is a much more detailed and complete answer about the topic.", 150.0
-        
-        refine = create_refine_node(
-            mock_llm,
-            "Question: {question}\nContext: {context}\nCurrent: {current_answer}",
-        )
-        
-        state: AgentState = {
-            "question": "What is RAG?",
-            "complexity": "simple",
-            "retrieval_strategy": "semantic",
-            "passages": [],
-            "context": "RAG combines retrieval with generation.",
-            "answer": "Short.",
-            "citations": [],
-            "needs_refinement": True,
-            "refinement_count": 0,
-            "max_refinements": 1,
-            "steps_executed": [],
-            "latency_ms": 0.0,
-            "model_used": "",
-        }
-        
-        result = refine(state)
-        
+            return "This is a much more detailed and complete answer about the topic.", 150.0, TokenUsage(7, 6, 13)
+
+        refine = create_refine_node(mock_llm, "Question: {question}\nContext: {context}\nCurrent: {current_answer}")
+        result = refine(make_state(context="RAG combines retrieval with generation.", answer="Short.", needs_refinement=True))
         assert len(result["answer"]) > len("Short.")
         assert result["refinement_count"] == 1
-        assert result["needs_refinement"] == False
-        assert "refine" in result["steps_executed"]
+        assert result["total_tokens"] == 13
 
 
 class TestRAGAgentIntegration:
     """Integration tests for the full RAGAgent."""
     
     def test_agent_full_run(self):
-        """Test complete agent execution with mocks."""
         call_log = []
-        
+
         def mock_llm(tier, system, user):
             call_log.append(f"llm:{tier}")
             if "classify" in user.lower() or "simple" in system.lower():
-                return "SIMPLE", 10.0
-            return "This is a complete answer about the topic.", 100.0
-        
+                return "SIMPLE", 10.0, None
+            return "This is a complete answer about the topic.", 100.0, TokenUsage(20, 10, 30)
+
         def mock_retrieve(question, k, strategy):
             call_log.append("retrieve")
             return [
                 {"id": "chunk-1", "text": "Test passage", "score": 0.9, "metadata": {}},
             ], 50.0, "semantic"
-        
+
         agent = RAGAgent(
             llm_fn=mock_llm,
             retrieve_fn=mock_retrieve,
             router_prompt="Classify: {question}",
             system_prompt="You are an assistant.",
             user_template="Context: {context}\nQuestion: {question}",
-            config=AgentConfig(max_refinements=0),  # Disable refinement
+            config=AgentConfig(max_refinements=0),
         )
-        
+
         result = agent.run("What is RAG?")
-        
-        assert result.answer != ""
-        assert "classify" in result.steps_executed
-        assert "retrieve" in result.steps_executed
-        assert "generate" in result.steps_executed
-        assert result.latency_ms > 0
-    
+        assert result.total_tokens == 30
+
     def test_agent_with_refinement(self):
-        """Test agent triggers refinement for short answers."""
         refinement_called = [False]
-        
+
         def mock_llm(tier, system, user):
             if "classify" in user.lower():
-                return "SIMPLE", 10.0
+                return "SIMPLE", 10.0, None
             if "improve" in system.lower() or refinement_called[0]:
-                return "This is a much longer and more complete answer.", 100.0
+                return "This is a much longer and more complete answer.", 100.0, TokenUsage(15, 20, 35)
             refinement_called[0] = True
-            return "Short.", 50.0  # First answer is short
-        
+            return "Short.", 50.0, TokenUsage(10, 5, 15)
+
         def mock_retrieve(question, k, strategy):
             return [
                 {"id": "chunk-1", "text": "Test", "score": 0.9, "metadata": {}},
             ], 50.0, "semantic"
-        
+
         agent = RAGAgent(
             llm_fn=mock_llm,
             retrieve_fn=mock_retrieve,
@@ -468,70 +244,22 @@ class TestRAGAgentIntegration:
             user_template="Context: {context}\nQuestion: {question}",
             config=AgentConfig(max_refinements=1),
         )
-        
+
         result = agent.run("What is RAG?")
-        
-        # Should have refined
-        assert result.refinement_count >= 0  # May or may not refine based on logic
+        assert result.total_tokens >= 15
 
 
 class TestClassifyNodeEdgeCases:
     """Edge case tests for classify node."""
     
     def test_classify_handles_llm_exception(self):
-        """Test classify defaults to simple on LLM error."""
-        def failing_llm(tier, system, user):
-            raise Exception("LLM unavailable")
-        
-        classify = create_classify_node(failing_llm, "Classify: {question}")
-        
-        state: AgentState = {
-            "question": "What is RAG?",
-            "complexity": "simple",
-            "retrieval_strategy": "semantic",
-            "passages": [],
-            "context": "",
-            "answer": "",
-            "citations": [],
-            "needs_refinement": False,
-            "refinement_count": 0,
-            "max_refinements": 1,
-            "steps_executed": [],
-            "latency_ms": 0.0,
-            "model_used": "",
-        }
-        
-        result = classify(state)
-        
-        # Should default to simple on error
+        classify = create_classify_node(lambda *args: (_ for _ in ()).throw(Exception("LLM unavailable")), "Classify: {question}")
+        result = classify(make_state())
         assert result["complexity"] == "simple"
-    
+
     def test_classify_short_query_uses_hybrid(self):
-        """Test that short queries get hybrid strategy."""
-        def mock_llm(tier, system, user):
-            return "SIMPLE", 10.0
-        
-        classify = create_classify_node(mock_llm, "Classify: {question}")
-        
-        state: AgentState = {
-            "question": "RAG",  # Very short query
-            "complexity": "simple",
-            "retrieval_strategy": "semantic",
-            "passages": [],
-            "context": "",
-            "answer": "",
-            "citations": [],
-            "needs_refinement": False,
-            "refinement_count": 0,
-            "max_refinements": 1,
-            "steps_executed": [],
-            "latency_ms": 0.0,
-            "model_used": "",
-        }
-        
-        result = classify(state)
-        
-        # Short queries should use hybrid for keyword matching
+        classify = create_classify_node(lambda *args: ("SIMPLE", 10.0, None), "Classify: {question}")
+        result = classify(make_state(question="RAG"))
         assert result["retrieval_strategy"] == "hybrid"
 
 

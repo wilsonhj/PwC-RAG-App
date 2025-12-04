@@ -550,7 +550,7 @@ _agent: Optional[RAGAgent] = None
 
 def _get_llm_fn_for_agent():
     """Create LLM function compatible with agent interface."""
-    def llm_fn(tier: str, system_prompt: str, user_prompt: str) -> Tuple[str, float]:
+    def llm_fn(tier: str, system_prompt: str, user_prompt: str) -> Tuple[str, float, Optional[TokenUsage]]:
         # Map string tier to ModelTier enum
         tier_map = {
             "router": ModelTier.ROUTER,
@@ -558,8 +558,14 @@ def _get_llm_fn_for_agent():
             "synthesis": ModelTier.SYNTHESIS,
         }
         model_tier = tier_map.get(tier, ModelTier.WORKER)
-        content, latency, _ = _call_llm(model_tier, system_prompt, user_prompt)
-        return content, latency
+        track_tokens = model_tier != ModelTier.ROUTER
+        content, latency, token_usage = _call_llm(
+            model_tier,
+            system_prompt,
+            user_prompt,
+            track_tokens=track_tokens,
+        )
+        return content, latency, token_usage if track_tokens else None
     return llm_fn
 
 
@@ -607,6 +613,9 @@ def answer_with_agent(question: str) -> AgentResult:
         retrieval_strategy=result.retrieval_strategy,
         num_chunks_retrieved=len(result.citations),
         latency_total_ms=result.latency_ms,
+        latency_generate_ms=result.latency_ms,
+        input_tokens=result.input_tokens,
+        output_tokens=result.output_tokens,
     )
     _recent_metrics.append(metrics)
     if len(_recent_metrics) > MAX_METRICS_HISTORY:

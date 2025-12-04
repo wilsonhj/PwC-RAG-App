@@ -17,6 +17,8 @@ import operator
 
 from langgraph.graph import StateGraph, END
 
+from .tokenizer import TokenUsage
+
 
 # ---------------------------------------------------------------------------
 # State Definition
@@ -47,6 +49,9 @@ class AgentState(TypedDict):
     steps_executed: Annotated[List[str], operator.add]
     latency_ms: float
     model_used: str
+    input_tokens: int
+    output_tokens: int
+    total_tokens: int
 
 
 @dataclass
@@ -69,6 +74,9 @@ class AgentResult:
     latency_ms: float
     model_used: str
     refinement_count: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    total_tokens: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -85,7 +93,7 @@ def create_classify_node(llm_fn, router_prompt: str):
         
         # Use LLM to classify
         try:
-            result, _ = llm_fn(
+            result, _, _ = llm_fn(
                 "router",
                 "You are a query classifier. Respond with SIMPLE or COMPLEX.",
                 router_prompt.format(question=question),
@@ -170,7 +178,11 @@ def create_generate_node(llm_fn, system_prompt: str, user_template: str):
         
         # Generate answer
         user_prompt = user_template.format(context=context, question=question)
-        answer, latency = llm_fn(model_tier, system_prompt, user_prompt)
+        answer, latency, token_usage = llm_fn(model_tier, system_prompt, user_prompt)
+        usage = token_usage or TokenUsage(0, 0, 0)
+        prev_input = state.get("input_tokens", 0)
+        prev_output = state.get("output_tokens", 0)
+        prev_total = state.get("total_tokens", 0)
         
         # Check if answer needs refinement
         needs_refinement = False
@@ -185,6 +197,9 @@ def create_generate_node(llm_fn, system_prompt: str, user_template: str):
             "needs_refinement": needs_refinement,
             "model_used": model_tier,
             "steps_executed": ["generate"],
+            "input_tokens": prev_input + usage.input_tokens,
+            "output_tokens": prev_output + usage.output_tokens,
+            "total_tokens": prev_total + usage.total_tokens,
         }
     
     return generate
@@ -208,10 +223,15 @@ def create_refine_node(llm_fn, refine_prompt: str):
             current_answer=current_answer,
         )
         
-        refined_answer, _ = llm_fn("synthesis", 
+        refined_answer, _, token_usage = llm_fn(
+            "synthesis",
             "You are an expert at improving answers. Make the answer more complete and accurate.",
             prompt,
         )
+        usage = token_usage or TokenUsage(0, 0, 0)
+        prev_input = state.get("input_tokens", 0)
+        prev_output = state.get("output_tokens", 0)
+        prev_total = state.get("total_tokens", 0)
         
         return {
             **state,
@@ -219,6 +239,9 @@ def create_refine_node(llm_fn, refine_prompt: str):
             "refinement_count": state.get("refinement_count", 0) + 1,
             "needs_refinement": False,
             "steps_executed": ["refine"],
+            "input_tokens": prev_input + usage.input_tokens,
+            "output_tokens": prev_output + usage.output_tokens,
+            "total_tokens": prev_total + usage.total_tokens,
         }
     
     return refine
@@ -364,6 +387,9 @@ class RAGAgent:
             "steps_executed": [],
             "latency_ms": 0.0,
             "model_used": "",
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "total_tokens": 0,
         }
         
         # Run graph
@@ -380,4 +406,7 @@ class RAGAgent:
             latency_ms=latency_ms,
             model_used=final_state.get("model_used", ""),
             refinement_count=final_state.get("refinement_count", 0),
+            input_tokens=final_state.get("input_tokens", 0),
+            output_tokens=final_state.get("output_tokens", 0),
+            total_tokens=final_state.get("total_tokens", 0),
         )
