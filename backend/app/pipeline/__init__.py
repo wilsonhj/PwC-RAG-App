@@ -5,8 +5,8 @@ Modular components:
 - chunker: Document chunking strategies
 - retriever: Retrieval strategies (semantic, hybrid, adaptive)
 - agent: LangGraph-based agentic workflow
-- embedder: Embedding abstraction (planned)
-- generator: LLM generation with token tracking (planned)
+- tokenizer: Token counting with tiktoken
+- logger: Structured JSON logging
 """
 
 from .chunker import Chunker, RecursiveChunker, Chunk
@@ -26,6 +26,20 @@ from .agent import (
     AgentResult,
     AgentState,
     build_rag_agent,
+)
+from .tokenizer import (
+    TokenCounter,
+    TokenUsage,
+    get_token_counter,
+    count_tokens,
+    count_usage,
+)
+from .logger import (
+    StructuredLogger,
+    LogLevel,
+    LogEntry,
+    get_logger,
+    configure_logger,
 )
 
 __all__ = [
@@ -48,4 +62,16 @@ __all__ = [
     "AgentResult",
     "AgentState",
     "build_rag_agent",
+    # Tokenizer
+    "TokenCounter",
+    "TokenUsage",
+    "get_token_counter",
+    "count_tokens",
+    "count_usage",
+    # Logger
+    "StructuredLogger",
+    "LogLevel",
+    "LogEntry",
+    "get_logger",
+    "configure_logger",
 ]

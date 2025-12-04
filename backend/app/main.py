@@ -56,6 +56,9 @@ class MetricsResponse(BaseModel):
     latency_retrieve_ms: float
     latency_generate_ms: float
     latency_total_ms: float
+    input_tokens: int = 0
+    output_tokens: int = 0
+    total_tokens: int = 0
 
 
 class QueryResponse(BaseModel):
@@ -163,6 +166,9 @@ async def query_rag(request: QueryRequest):
             latency_retrieve_ms=round(metrics.latency_retrieve_ms, 2),
             latency_generate_ms=round(metrics.latency_generate_ms, 2),
             latency_total_ms=round(metrics.latency_total_ms, 2),
+            input_tokens=metrics.input_tokens,
+            output_tokens=metrics.output_tokens,
+            total_tokens=metrics.input_tokens + metrics.output_tokens,
         )
     
     return QueryResponse(

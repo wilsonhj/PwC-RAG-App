@@ -33,6 +33,8 @@ import ollama
 from .config import get_config, ModelTier, RetrievalStrategy
 from .pipeline.chunker import RecursiveChunker, Chunk
 from .pipeline.retriever import create_retriever, RetrievalResponse
+from .pipeline.tokenizer import count_usage, TokenUsage
+from .pipeline.logger import get_logger
 
 
 # ---------------------------------------------------------------------------
@@ -400,14 +402,16 @@ def _call_llm(
     model_tier: ModelTier,
     system_prompt: str,
     user_prompt: str,
-) -> Tuple[str, float]:
+    track_tokens: bool = True,
+) -> Tuple[str, float, Optional[TokenUsage]]:
     """
     Call Ollama with specified model tier.
     
     Returns:
-        Tuple of (response content, latency in ms)
+        Tuple of (response content, latency in ms, token usage)
     """
     model = config.llm.get_model(model_tier)
+    logger = get_logger()
     start = time.time()
     
     response = ollama.chat(
@@ -423,23 +427,38 @@ def _call_llm(
     )
     
     latency_ms = (time.time() - start) * 1000
-    return response["message"]["content"], latency_ms
+    content = response["message"]["content"]
+    
+    # Count tokens
+    token_usage = None
+    if track_tokens:
+        token_usage = count_usage(system_prompt, user_prompt, content)
+        logger.log_llm_call(
+            model=model,
+            tier=model_tier.value,
+            input_tokens=token_usage.input_tokens,
+            output_tokens=token_usage.output_tokens,
+            latency_ms=latency_ms,
+        )
+    
+    return content, latency_ms, token_usage
 
 
 def route_query(question: str) -> ModelTier:
     """Use router model to classify query complexity."""
     try:
-        result, _ = _call_llm(
+        result, _, _ = _call_llm(
             ModelTier.ROUTER,
             "You are a query classifier. Respond with only SIMPLE or COMPLEX.",
             ROUTER_PROMPT.format(question=question),
+            track_tokens=False,  # Don't track tokens for routing
         )
         # Parse response
         if "COMPLEX" in result.upper():
             return ModelTier.SYNTHESIS
         return ModelTier.WORKER
     except Exception as e:
-        print(f"Router failed, defaulting to worker: {e}")
+        get_logger().log_error("router", e)
         return ModelTier.WORKER
 
 
@@ -466,7 +485,11 @@ def answer_question(
     Returns:
         Tuple of (answer, citations, metrics)
     """
+    logger = get_logger()
     total_start = time.time()
+    
+    # Log query start
+    logger.log_query_start(question, (strategy or config.retrieval.strategy).value)
     
     # Step 1: Route to appropriate model
     if use_routing:
@@ -478,14 +501,17 @@ def answer_question(
     passages, retrieve_latency, strategy_used = retrieve(question, k=top_k, strategy=strategy)
     context = "\n".join(f"[{p['id']}] {p['text']}" for p in passages)
     citations = [p["id"] for p in passages]
+    
+    # Log retrieval
+    logger.log_retrieval(strategy_used, len(passages), retrieve_latency)
 
-    # Step 3: Generate with selected model
+    # Step 3: Generate with selected model (now returns token usage)
     user_prompt = USER_PROMPT_TEMPLATE.format(context=context, question=question)
-    answer, generate_latency = _call_llm(model_tier, SYSTEM_PROMPT, user_prompt)
+    answer, generate_latency, token_usage = _call_llm(model_tier, SYSTEM_PROMPT, user_prompt)
     
     total_latency = (time.time() - total_start) * 1000
     
-    # Build metrics
+    # Build metrics with token counts
     model_used = config.llm.get_model(model_tier)
     metrics = QueryMetrics(
         query=question,
@@ -496,12 +522,17 @@ def answer_question(
         latency_retrieve_ms=retrieve_latency,
         latency_generate_ms=generate_latency,
         latency_total_ms=total_latency,
+        input_tokens=token_usage.input_tokens if token_usage else 0,
+        output_tokens=token_usage.output_tokens if token_usage else 0,
     )
     
     # Store metrics
     _recent_metrics.append(metrics)
     if len(_recent_metrics) > MAX_METRICS_HISTORY:
         _recent_metrics.pop(0)
+    
+    # Log query completion
+    logger.log_query_complete(question, total_latency, len(passages), model_used)
     
     # Add model info for debugging
     answer = f"[Model: {model_used}]\n\n{answer}"
@@ -527,7 +558,8 @@ def _get_llm_fn_for_agent():
             "synthesis": ModelTier.SYNTHESIS,
         }
         model_tier = tier_map.get(tier, ModelTier.WORKER)
-        return _call_llm(model_tier, system_prompt, user_prompt)
+        content, latency, _ = _call_llm(model_tier, system_prompt, user_prompt)
+        return content, latency
     return llm_fn
 
 
