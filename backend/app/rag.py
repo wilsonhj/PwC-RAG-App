@@ -32,6 +32,7 @@ import ollama
 
 from .config import get_config, ModelTier, RetrievalStrategy
 from .pipeline.chunker import RecursiveChunker, Chunk
+from .pipeline.retriever import create_retriever, RetrievalResponse
 
 
 # ---------------------------------------------------------------------------
@@ -144,13 +145,34 @@ def index_documents(documents: Optional[List[dict]] = None) -> int:
     return indexed
 
 
+# ---------------------------------------------------------------------------
+# Retriever instances (lazy initialization)
+# ---------------------------------------------------------------------------
+_retrievers: dict = {}
+
+
+def _get_retriever(strategy: RetrievalStrategy):
+    """Get or create a retriever for the given strategy."""
+    if strategy not in _retrievers:
+        _retrievers[strategy] = create_retriever(
+            strategy=strategy,
+            collection=_collection,
+            embed_fn=_get_embedding,
+            documents=DOCUMENTS,
+            config=config,
+        )
+    return _retrievers[strategy]
+
+
 def retrieve(
     question: str,
     k: Optional[int] = None,
     strategy: Optional[RetrievalStrategy] = None,
-) -> Tuple[List[dict], float]:
+) -> Tuple[List[dict], float, str]:
     """
     Retrieve relevant passages using configured strategy.
+    
+    Now supports semantic, hybrid (BM25 + semantic), and adaptive strategies.
     
     Args:
         question: The query string
@@ -158,35 +180,27 @@ def retrieve(
         strategy: Retrieval strategy (uses config default if None)
         
     Returns:
-        Tuple of (passages list, latency in ms)
+        Tuple of (passages list, latency in ms, strategy used)
     """
     k = k or config.retrieval.top_k
     strategy = strategy or config.retrieval.strategy
     
-    start = time.time()
-    query_embedding, embed_latency = _get_embedding(question)
+    # Use the new retriever module
+    retriever = _get_retriever(strategy)
+    response: RetrievalResponse = retriever.retrieve(query=question, k=k)
     
-    results = _collection.query(
-        query_embeddings=[query_embedding],
-        n_results=k,
-        include=["documents", "metadatas", "distances"],
-    )
+    # Convert to legacy format for backward compatibility
+    passages = [
+        {
+            "id": r.id,
+            "text": r.text,
+            "score": r.score,
+            "metadata": r.metadata,
+        }
+        for r in response.results
+    ]
     
-    passages = []
-    for i, doc_id in enumerate(results["ids"][0]):
-        score = 1 - results["distances"][0][i]  # Convert distance to similarity
-        
-        # Apply similarity threshold
-        if score >= config.retrieval.similarity_threshold:
-            passages.append({
-                "id": doc_id,
-                "text": results["documents"][0][i],
-                "score": score,
-                "metadata": results["metadatas"][0][i] if results["metadatas"] else {},
-            })
-    
-    total_latency = (time.time() - start) * 1000
-    return passages, total_latency
+    return passages, response.latency_ms, response.strategy_used.value
 
 
 def get_collection_stats() -> dict:
@@ -301,8 +315,8 @@ def answer_question(
     else:
         model_tier = ModelTier.WORKER
     
-    # Step 2: Retrieve with timing
-    passages, retrieve_latency = retrieve(question, k=top_k, strategy=strategy)
+    # Step 2: Retrieve with timing (now returns strategy used)
+    passages, retrieve_latency, strategy_used = retrieve(question, k=top_k, strategy=strategy)
     context = "\n".join(f"[{p['id']}] {p['text']}" for p in passages)
     citations = [p["id"] for p in passages]
 
@@ -318,7 +332,7 @@ def answer_question(
         query=question,
         model_tier=model_tier.value,
         model_used=model_used,
-        retrieval_strategy=(strategy or config.retrieval.strategy).value,
+        retrieval_strategy=strategy_used,
         num_chunks_retrieved=len(passages),
         latency_retrieve_ms=retrieve_latency,
         latency_generate_ms=generate_latency,
