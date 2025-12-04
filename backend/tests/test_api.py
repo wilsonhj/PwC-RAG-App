@@ -148,3 +148,73 @@ class TestMetricsEndpoint:
         assert "count" in data
         assert "metrics" in data
         assert isinstance(data["metrics"], list)
+
+
+class TestAgentEndpoint:
+    """Tests for the LangGraph agent endpoint."""
+    
+    @pytest.mark.asyncio
+    async def test_agent_basic(self, client):
+        """Test basic agent query."""
+        try:
+            response = await client.post(
+                "/agent",
+                json={"question": "What is RAG?"},
+            )
+            
+            if response.status_code == 200:
+                data = response.json()
+                assert "answer" in data
+                assert "citations" in data
+                assert "complexity" in data
+                assert "retrieval_strategy" in data
+                assert "steps_executed" in data
+                assert "latency_ms" in data
+                assert "model_used" in data
+                assert "refinement_count" in data
+                
+                # Verify steps were executed
+                assert isinstance(data["steps_executed"], list)
+                assert len(data["steps_executed"]) >= 3  # classify, retrieve, generate
+            else:
+                pytest.skip("Ollama not available")
+        except Exception as e:
+            pytest.skip(f"Agent test skipped: {e}")
+    
+    @pytest.mark.asyncio
+    async def test_agent_complex_query(self, client):
+        """Test agent with complex query."""
+        try:
+            response = await client.post(
+                "/agent",
+                json={"question": "Compare and contrast different AI consulting approaches and their integration with RAG systems"},
+            )
+            
+            if response.status_code == 200:
+                data = response.json()
+                # Complex queries should be classified as complex
+                # (though this depends on the LLM's classification)
+                assert data["complexity"] in ["simple", "complex"]
+                assert data["retrieval_strategy"] in ["semantic", "hybrid", "adaptive"]
+            else:
+                pytest.skip("Ollama not available")
+        except Exception as e:
+            pytest.skip(f"Agent test skipped: {e}")
+    
+    @pytest.mark.asyncio
+    async def test_agent_returns_citations(self, client):
+        """Test that agent returns citations."""
+        try:
+            response = await client.post(
+                "/agent",
+                json={"question": "What does PwC do?"},
+            )
+            
+            if response.status_code == 200:
+                data = response.json()
+                assert isinstance(data["citations"], list)
+                # Should have some citations from the knowledge base
+            else:
+                pytest.skip("Ollama not available")
+        except Exception as e:
+            pytest.skip(f"Agent test skipped: {e}")

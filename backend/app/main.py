@@ -6,6 +6,7 @@ from pydantic import BaseModel
 from .config import get_config, RetrievalStrategy
 from .rag import (
     answer_question,
+    answer_with_agent,
     get_recent_metrics,
     get_collection_stats,
     ingest_text,
@@ -15,6 +16,7 @@ from .rag import (
     get_all_documents,
     IngestResult,
 )
+from .pipeline.agent import AgentResult
 
 
 config = get_config()
@@ -99,6 +101,24 @@ class BulkIngestResponse(BaseModel):
     total_documents: int
 
 
+# Agent models
+class AgentQueryRequest(BaseModel):
+    """Request model for agent-based queries."""
+    question: str
+
+
+class AgentQueryResponse(BaseModel):
+    """Response model for agent-based queries."""
+    answer: str
+    citations: List[str]
+    complexity: str
+    retrieval_strategy: str
+    steps_executed: List[str]
+    latency_ms: float
+    model_used: str
+    refinement_count: int
+
+
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
@@ -150,6 +170,36 @@ async def query_rag(request: QueryRequest):
         citations=citations,
         metrics=metrics_response,
     )
+
+
+@app.post("/agent", response_model=AgentQueryResponse)
+async def agent_query(request: AgentQueryRequest):
+    """
+    Query using the LangGraph agent.
+    
+    The agent uses a state machine workflow:
+    1. **classify**: Determine query complexity (simple/complex)
+    2. **retrieve**: Fetch relevant passages using optimal strategy
+    3. **generate**: Produce answer with appropriate model tier
+    4. **refine** (optional): Improve answer if uncertain
+    
+    Returns detailed execution metadata including steps executed.
+    """
+    try:
+        result = answer_with_agent(request.question)
+        
+        return AgentQueryResponse(
+            answer=result.answer,
+            citations=result.citations,
+            complexity=result.complexity,
+            retrieval_strategy=result.retrieval_strategy,
+            steps_executed=result.steps_executed,
+            latency_ms=round(result.latency_ms, 2),
+            model_used=result.model_used,
+            refinement_count=result.refinement_count,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Agent error: {str(e)}")
 
 
 @app.get("/stats", response_model=StatsResponse)

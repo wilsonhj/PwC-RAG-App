@@ -510,6 +510,80 @@ def answer_question(
 
 
 # ---------------------------------------------------------------------------
+# LangGraph Agent
+# ---------------------------------------------------------------------------
+from .pipeline.agent import RAGAgent, AgentConfig, AgentResult
+
+_agent: Optional[RAGAgent] = None
+
+
+def _get_llm_fn_for_agent():
+    """Create LLM function compatible with agent interface."""
+    def llm_fn(tier: str, system_prompt: str, user_prompt: str) -> Tuple[str, float]:
+        # Map string tier to ModelTier enum
+        tier_map = {
+            "router": ModelTier.ROUTER,
+            "worker": ModelTier.WORKER,
+            "synthesis": ModelTier.SYNTHESIS,
+        }
+        model_tier = tier_map.get(tier, ModelTier.WORKER)
+        return _call_llm(model_tier, system_prompt, user_prompt)
+    return llm_fn
+
+
+def get_agent() -> RAGAgent:
+    """Get or create the RAG agent."""
+    global _agent
+    if _agent is None:
+        _agent = RAGAgent(
+            llm_fn=_get_llm_fn_for_agent(),
+            retrieve_fn=retrieve,
+            router_prompt=ROUTER_PROMPT,
+            system_prompt=SYSTEM_PROMPT,
+            user_template=USER_PROMPT_TEMPLATE,
+            config=AgentConfig(max_refinements=1),
+        )
+    return _agent
+
+
+def answer_with_agent(question: str) -> AgentResult:
+    """
+    Answer a question using the LangGraph agent.
+    
+    The agent uses a state machine with nodes:
+    - classify: Determine query complexity
+    - retrieve: Fetch relevant passages
+    - generate: Produce answer
+    - refine: Improve answer if needed
+    
+    Args:
+        question: The user's question
+        
+    Returns:
+        AgentResult with answer, citations, and execution metadata
+    """
+    agent = get_agent()
+    result = agent.run(question)
+    
+    # Track in metrics
+    metrics = QueryMetrics(
+        query=question,
+        model_tier=result.model_used,
+        model_used=config.llm.get_model(
+            ModelTier.SYNTHESIS if result.complexity == "complex" else ModelTier.WORKER
+        ),
+        retrieval_strategy=result.retrieval_strategy,
+        num_chunks_retrieved=len(result.citations),
+        latency_total_ms=result.latency_ms,
+    )
+    _recent_metrics.append(metrics)
+    if len(_recent_metrics) > MAX_METRICS_HISTORY:
+        _recent_metrics.pop(0)
+    
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Auto-index on module load
 # ---------------------------------------------------------------------------
 try:
