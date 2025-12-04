@@ -1,10 +1,20 @@
-from typing import Optional
-from fastapi import FastAPI
+from typing import Optional, List
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from .config import get_config, RetrievalStrategy
-from .rag import answer_question, get_recent_metrics, get_collection_stats
+from .rag import (
+    answer_question,
+    get_recent_metrics,
+    get_collection_stats,
+    ingest_text,
+    ingest_documents,
+    delete_document,
+    clear_all_documents,
+    get_all_documents,
+    IngestResult,
+)
 
 
 config = get_config()
@@ -58,6 +68,35 @@ class StatsResponse(BaseModel):
     total_documents: int
     collection_name: str
     distance_metric: str
+
+
+# Ingestion models
+class IngestTextRequest(BaseModel):
+    """Request model for ingesting raw text."""
+    text: str
+    source_id: Optional[str] = None
+    metadata: Optional[dict] = None
+
+
+class IngestDocumentsRequest(BaseModel):
+    """Request model for ingesting multiple documents."""
+    documents: List[dict]  # Each with 'text', optional 'source_id', 'metadata'
+
+
+class IngestResponse(BaseModel):
+    """Response model for ingestion."""
+    source_id: str
+    chunks_created: int
+    chunks_indexed: int
+    total_documents: int
+
+
+class BulkIngestResponse(BaseModel):
+    """Response model for bulk ingestion."""
+    documents_processed: int
+    total_chunks_created: int
+    total_chunks_indexed: int
+    total_documents: int
 
 
 # ---------------------------------------------------------------------------
@@ -156,3 +195,87 @@ async def get_current_config():
             "chunk_overlap": config.chunking.chunk_overlap,
         },
     }
+
+
+# ---------------------------------------------------------------------------
+# Document Ingestion Endpoints
+# ---------------------------------------------------------------------------
+@app.post("/ingest", response_model=IngestResponse)
+async def ingest_text_endpoint(request: IngestTextRequest):
+    """
+    Ingest raw text into the RAG system.
+    
+    The text will be:
+    1. Chunked using the recursive chunker
+    2. Embedded using the configured embedding model
+    3. Stored in ChromaDB for retrieval
+    
+    - **text**: The raw text to ingest
+    - **source_id**: Optional identifier for the source document
+    - **metadata**: Optional metadata to attach to all chunks
+    """
+    result = ingest_text(
+        text=request.text,
+        source_id=request.source_id,
+        metadata=request.metadata,
+    )
+    
+    return IngestResponse(
+        source_id=result.source_id,
+        chunks_created=result.chunks_created,
+        chunks_indexed=result.chunks_indexed,
+        total_documents=result.total_documents,
+    )
+
+
+@app.post("/ingest/bulk", response_model=BulkIngestResponse)
+async def ingest_bulk_endpoint(request: IngestDocumentsRequest):
+    """
+    Ingest multiple documents into the RAG system.
+    
+    Each document should have:
+    - **text**: The raw text (required)
+    - **source_id**: Optional identifier
+    - **metadata**: Optional metadata dict
+    """
+    results = ingest_documents(request.documents)
+    
+    return BulkIngestResponse(
+        documents_processed=len(results),
+        total_chunks_created=sum(r.chunks_created for r in results),
+        total_chunks_indexed=sum(r.chunks_indexed for r in results),
+        total_documents=results[-1].total_documents if results else 0,
+    )
+
+
+@app.get("/documents")
+async def list_documents():
+    """List all documents in the system."""
+    docs = get_all_documents()
+    return {
+        "count": len(docs),
+        "documents": [
+            {
+                "id": d["id"],
+                "text_preview": d["text"][:100] + "..." if len(d["text"]) > 100 else d["text"],
+                "metadata": d.get("metadata", {}),
+            }
+            for d in docs
+        ],
+    }
+
+
+@app.delete("/documents/{doc_id}")
+async def delete_document_endpoint(doc_id: str):
+    """Delete a specific document by ID."""
+    success = delete_document(doc_id)
+    if not success:
+        raise HTTPException(status_code=404, detail=f"Document {doc_id} not found")
+    return {"message": f"Document {doc_id} deleted", "success": True}
+
+
+@app.delete("/documents")
+async def clear_documents_endpoint():
+    """Delete all documents from the system."""
+    count = clear_all_documents()
+    return {"message": f"Deleted {count} documents", "count": count}

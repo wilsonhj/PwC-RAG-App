@@ -97,6 +97,9 @@ DOCUMENTS = [
     },
 ]
 
+# In-memory document store for BM25 (synced with ChromaDB)
+_document_store: List[dict] = list(DOCUMENTS)
+
 # ---------------------------------------------------------------------------
 # ChromaDB setup (persistent, uses config)
 # ---------------------------------------------------------------------------
@@ -146,9 +149,165 @@ def index_documents(documents: Optional[List[dict]] = None) -> int:
 
 
 # ---------------------------------------------------------------------------
+# Document Ingestion
+# ---------------------------------------------------------------------------
+_chunker = RecursiveChunker()
+
+
+@dataclass
+class IngestResult:
+    """Result of document ingestion."""
+    source_id: str
+    chunks_created: int
+    chunks_indexed: int
+    total_documents: int
+
+
+def ingest_text(
+    text: str,
+    source_id: Optional[str] = None,
+    metadata: Optional[dict] = None,
+) -> IngestResult:
+    """
+    Ingest raw text: chunk it, embed it, and store in ChromaDB.
+    
+    Args:
+        text: The raw text to ingest
+        source_id: Optional identifier for the source document
+        metadata: Optional metadata to attach to all chunks
+        
+    Returns:
+        IngestResult with stats about the ingestion
+    """
+    import uuid
+    
+    # Generate source ID if not provided
+    source_id = source_id or f"doc-{uuid.uuid4().hex[:8]}"
+    metadata = metadata or {}
+    metadata["source_id"] = source_id
+    metadata["ingested_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+    
+    # Chunk the text
+    chunks = _chunker.chunk(text, source_id=source_id, metadata=metadata)
+    
+    if not chunks:
+        return IngestResult(
+            source_id=source_id,
+            chunks_created=0,
+            chunks_indexed=0,
+            total_documents=_collection.count(),
+        )
+    
+    # Convert chunks to document format
+    docs = [
+        {
+            "id": chunk.id,
+            "text": chunk.text,
+            "metadata": {
+                **chunk.metadata,
+                "source_id": source_id,
+                "chunk_index": chunk.chunk_index,
+                "start_char": chunk.start_char,
+                "end_char": chunk.end_char,
+            },
+        }
+        for chunk in chunks
+    ]
+    
+    # Index into ChromaDB
+    indexed = index_documents(docs)
+    
+    # Update in-memory document store for BM25
+    _document_store.extend(docs)
+    _invalidate_retrievers()
+    
+    return IngestResult(
+        source_id=source_id,
+        chunks_created=len(chunks),
+        chunks_indexed=indexed,
+        total_documents=_collection.count(),
+    )
+
+
+def ingest_documents(
+    documents: List[dict],
+) -> List[IngestResult]:
+    """
+    Ingest multiple documents.
+    
+    Args:
+        documents: List of dicts with 'text' and optional 'source_id', 'metadata'
+        
+    Returns:
+        List of IngestResult for each document
+    """
+    results = []
+    for doc in documents:
+        result = ingest_text(
+            text=doc["text"],
+            source_id=doc.get("source_id") or doc.get("id"),
+            metadata=doc.get("metadata"),
+        )
+        results.append(result)
+    return results
+
+
+def get_all_documents() -> List[dict]:
+    """Get all documents from the in-memory store."""
+    return _document_store.copy()
+
+
+def delete_document(doc_id: str) -> bool:
+    """
+    Delete a document from ChromaDB and in-memory store.
+    
+    Args:
+        doc_id: The document ID to delete
+        
+    Returns:
+        True if deleted, False if not found
+    """
+    global _document_store
+    
+    try:
+        _collection.delete(ids=[doc_id])
+        _document_store = [d for d in _document_store if d["id"] != doc_id]
+        _invalidate_retrievers()
+        return True
+    except Exception:
+        return False
+
+
+def clear_all_documents() -> int:
+    """
+    Clear all documents from ChromaDB and in-memory store.
+    
+    Returns:
+        Number of documents deleted
+    """
+    global _document_store
+    
+    count = _collection.count()
+    if count > 0:
+        all_ids = _collection.get()["ids"]
+        _collection.delete(ids=all_ids)
+    
+    _document_store = []
+    _invalidate_retrievers()
+    
+    return count
+
+
+# ---------------------------------------------------------------------------
 # Retriever instances (lazy initialization)
 # ---------------------------------------------------------------------------
 _retrievers: dict = {}
+
+
+def _invalidate_retrievers():
+    """Clear cached retrievers so they rebuild with updated documents."""
+    global _retrievers
+    _retrievers = {}
 
 
 def _get_retriever(strategy: RetrievalStrategy):
@@ -158,7 +317,7 @@ def _get_retriever(strategy: RetrievalStrategy):
             strategy=strategy,
             collection=_collection,
             embed_fn=_get_embedding,
-            documents=DOCUMENTS,
+            documents=_document_store,  # Use dynamic document store for BM25
             config=config,
         )
     return _retrievers[strategy]
